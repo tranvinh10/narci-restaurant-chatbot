@@ -28,7 +28,6 @@ class ReservationService
     ): ?Collection {
         $endTime = $this->addMinutes($startTime, self::DURATION_MINUTES);
 
-        // 1. Bàn nào đang bị chiếm trong khung giờ này? (Quy tắc A.4, A.6: đơn cancelled không tính)
         $busyTableIds = DB::table('reservation_restaurant_table as rrt')
             ->join('reservations as r', 'r.id', '=', 'rrt.reservation_id')
             ->where('r.branch_id', $branch->id)
@@ -38,7 +37,6 @@ class ReservationService
             ->where('r.end_time', '>', $startTime)
             ->pluck('rrt.restaurant_table_id');
 
-        // 2. Trong số bàn còn trống, lọc theo chi nhánh + loại chỗ ngồi (nếu khách yêu cầu cụ thể)
         $query = RestaurantTable::where('branch_id', $branch->id)
             ->where('is_active', true)
             ->whereNotIn('id', $busyTableIds);
@@ -49,15 +47,11 @@ class ReservationService
 
         $freeTables = $query->orderBy('capacity')->get();
 
-        // 3. Ưu tiên 1 bàn đủ chỗ, nhỏ nhất có thể (đỡ phí bàn lớn cho nhóm nhỏ)
-        $single = $freeTables->first(fn (RestaurantTable $t) => $t->capacity >= $partySize);
+        $single = $freeTables->first(fn(RestaurantTable $t) => $t->capacity >= $partySize);
         if ($single) {
             return collect([$single]);
         }
 
-        // 4. Không có bàn đơn nào đủ → thử ghép 2 bàn (VD: bàn 2 + bàn 4 cho nhóm 6 người).
-        //    Đây là thuật toán ghép đơn giản (heuristic), chưa phải tối ưu toàn cục,
-        //    nhưng đủ dùng cho quy mô bàn của 1 chi nhánh thực tế.
         foreach ($freeTables as $i => $first) {
             foreach ($freeTables->slice($i + 1) as $second) {
                 if ($first->capacity + $second->capacity >= $partySize) {
@@ -66,13 +60,10 @@ class ReservationService
             }
         }
 
-        return null; // hết bàn thật sự
+        return null;
     }
 
     /**
-     * Khi hết bàn đúng giờ khách chọn, gợi ý các khung giờ lân cận còn trống
-     * (+/- 30-60 phút), không vượt quá giờ hoạt động của chi nhánh (Quy tắc A.7).
-     *
      * @return array<int, array{time: string, tables: Collection}>
      */
     public function suggestNearbySlots(
@@ -108,20 +99,15 @@ class ReservationService
     }
 
     /**
-     * Tạo đơn đặt bàn thật sự. Dùng Database Transaction + khoá dòng (lockForUpdate)
-     * để 2 request đặt cùng lúc không thể trúng cùng 1 bàn (Quy tắc A.5).
+     * Tạo đơn đặt bàn thật sự, bọc trong Database Transaction + lockForUpdate (Quy tắc A.5).
      */
     public function createReservation(array $data, Collection $tables): Reservation
     {
         return DB::transaction(function () use ($data, $tables) {
             $tableIds = $tables->pluck('id');
 
-            // Khoá các bàn liên quan trong lúc transaction đang chạy — request khác
-            // cũng đi qua đường này sẽ phải đợi tới khi transaction này commit xong.
             RestaurantTable::whereIn('id', $tableIds)->lockForUpdate()->get();
 
-            // Kiểm tra lại lần cuối NGAY TRONG transaction: giữa lúc FE gọi
-            // check-availability và lúc bấm xác nhận, có thể 1 request khác đã chen vào.
             $stillFree = $this->findAvailableTables(
                 Branch::findOrFail($data['branch_id']),
                 $data['reservation_date'],
@@ -155,6 +141,50 @@ class ReservationService
             $reservation->tables()->attach($tableIds);
 
             return $reservation;
+        });
+    }
+
+    /**
+     * Huỷ đơn — đơn cancelled không còn tính là đang chiếm bàn (Quy tắc A.6).
+     */
+    public function cancelReservation(Reservation $reservation): Reservation
+    {
+        $reservation->update(['status' => 'cancelled']);
+
+        return $reservation;
+    }
+
+    /**
+     * Đổi giờ: tạm "thả" bàn cũ (đánh dấu cancelled) để tìm bàn ở giờ mới không bị
+     * chính đơn này cản trở, nếu không tìm được thì khôi phục lại trạng thái ban đầu.
+     */
+    public function rescheduleReservation(Reservation $reservation, string $newTime): Reservation
+    {
+        return DB::transaction(function () use ($reservation, $newTime) {
+            $originalStatus = $reservation->status;
+            $reservation->update(['status' => 'cancelled']);
+
+            $tables = $this->findAvailableTables(
+                $reservation->branch,
+                $reservation->reservation_date->toDateString(),
+                $newTime,
+                $reservation->party_size,
+                $reservation->seating_preference
+            );
+
+            if (! $tables) {
+                $reservation->update(['status' => $originalStatus]);
+                throw new \RuntimeException('Không còn bàn trống ở khung giờ mới, giữ nguyên giờ cũ.');
+            }
+
+            $reservation->tables()->sync($tables->pluck('id'));
+            $reservation->update([
+                'start_time' => $newTime,
+                'end_time' => $this->addMinutes($newTime, self::DURATION_MINUTES),
+                'status' => 'confirmed',
+            ]);
+
+            return $reservation->fresh('tables');
         });
     }
 

@@ -12,9 +12,11 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        $middleware->validateCsrfTokens(except: [
-            'reservations',      // tạm bỏ CSRF để test POST qua Postman ở Bước 2
-            'reservations/*',    // Bước 4 sẽ gắn @csrf khi có form/fetch thật, lúc đó bỏ dòng này
+        $middleware->preventRequestForgery(except: [
+            'reservations',
+            'reservations/*',
+            'chat',
+            'chat/*',
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

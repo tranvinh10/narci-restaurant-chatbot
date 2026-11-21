@@ -14,7 +14,7 @@ return new class extends Migration
     {
         Schema::create('branches', function (Blueprint $table) {
             $table->id();
-            $table->string('name');                   // VD: "L'Artisan 4P's - Quận 1"
+            $table->string('name');                   // VD: "Narci-Restaurant - Quận 1"
             $table->string('slug')->unique();          // VD: "quan-1"
             $table->string('city');                    // VD: "TP.HCM", "Hà Nội"
             $table->string('address');

@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\ChatController;
 use App\Http\Controllers\MenuController;
 use App\Http\Controllers\ReservationController;
 use App\Models\Branch;
@@ -18,4 +19,9 @@ Route::get('/menu', [MenuController::class, 'index'])->name('menu.index');
 Route::prefix('reservations')->name('reservations.')->group(function () {
     Route::post('/check-availability', [ReservationController::class, 'checkAvailability'])->name('check');
     Route::post('/', [ReservationController::class, 'store'])->name('store');
+});
+
+Route::prefix('chat')->name('chat.')->group(function () {
+    Route::post('/', [ChatController::class, 'send'])->name('send');
+    Route::post('/reset', [ChatController::class, 'reset'])->name('reset');
 });
